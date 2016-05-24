@@ -101,8 +101,8 @@
 
 // Define variables and constants
 // Pin Constants
-const int int2Pin = 2;         // This is the interrupt pin that registers taps
-const int int1Pin = 3;         // This is ths RTC interrupt pin
+const int intPinACC = 2;         // This is the interrupt pin that registers taps
+const int intPinRTC = 3;         // This is ths RTC interrupt pin
 const int ledPin = 9;          // led connected to digital pin 9
 const int led2Pin = 10;        // The Yellow Signal Strength LED
 const int SensitivityPot = A0; // Potentiometer used to adjust sensitivity
@@ -147,7 +147,7 @@ SoftwareSerial fonaSS = SoftwareSerial(FONA_TX, FONA_RX);
 SoftwareSerial *fonaSerial = &fonaSS;
 Adafruit_FONA fona = Adafruit_FONA(FONA_RST);
 uint8_t readline(char *buff, uint8_t maxbuff, uint16_t timeout = 0);
-DS1339 RTC = DS1339(int1Pin,0);          // Instantiate the RTC on Pin 2 and interrupt 0
+DS1339 RTC = DS1339(intPinRTC,1);          // Instantiate the RTC on Pin 3 and interrupt 1
 MAX17043 batteryMonitor;  // Instantiate the Fuel Gauge library
 
 // From my user Functions
@@ -194,10 +194,10 @@ void setup()
 {
     Serial.begin(19200);
     while (!Serial) ;   // while the serial stream is not open, do nothing:
-    Serial.println(F("Running sketch Solar_Micro_GPRS_2_v2"));
+    Serial.println(F("Running sketch Trail-Counter-Arduino-FONA"));
     RTC.start(); // ensure RTC oscillator is running, if not already
-    pinMode(int1Pin, INPUT);      // RTC Interrupt pins
-    digitalWrite(int1Pin, HIGH);
+    pinMode(intPinRTC, INPUT);      // RTC Interrupt pins
+    digitalWrite(intPinRTC, HIGH);  // Turn on the internal pull-up
     pinMode(ledPin, OUTPUT);       // Bump LED
     digitalWrite(ledPin,HIGH);     // Turn it on for now
     pinMode(led2Pin, OUTPUT);     // Signal LED
@@ -205,8 +205,8 @@ void setup()
     pinMode(FONA_KEY,OUTPUT);      // This is the pin used to turn on and off the Fona
     pinMode(FONA_PS,INPUT);        // Need to declare pins for the Teensy
     digitalWrite(FONA_PS,HIGH);    //  Let's turn on the pull-up
-    pinMode(int2Pin, INPUT);       // This is the pin the accelerometer will use to wake the Arduino
-    digitalWrite(int2Pin, HIGH);   // Internal pull-up
+    pinMode(intPinACC, INPUT);       // This is the pin the accelerometer will use to wake the Arduino
+    digitalWrite(intPinACC, HIGH);   // Internal pull-up
     
     // Initialize the FONA
     if(digitalRead(FONA_PS)) {
@@ -261,13 +261,15 @@ void setup()
     batteryMonitor.quickStart();
     NonBlockingDelay(1000);
     
+    set_hourly_alarm();     // Set an hourly alarm
+    
     digitalWrite(ledPin, LOW);  // Let's us know we made it through Setup
 }
 
-// Add loop code
-void loop()
+
+void loop() // Add loop code
 {
-    if (!digitalRead(int1Pin))   { // This checks to see if it is time to send data or if we need to retry
+    if (!digitalRead(intPinRTC))   { // This checks to see if it is time to send data or if we need to retry
         Serial.println(F("Alarm"));
         read_time();
         RTC.clear_interrupt();
@@ -283,7 +285,7 @@ void loop()
         if (LastSend + TransmitRetry <= millis()) {  // And we are not in a Retry Mode
             TurnOnFona();                    // Turn on the module
             CheckForBump();                  // This is where we look to see if we should count a bump
-            if(GetConnected()) {             // Connect to network and start GPRS
+            if(InitializeFona()) {             // Connect to network and start GPRS
                 CheckForBump();                // This is where we look to see if we should count a bump
                 if (sendToUbidots()) {         // Send data to Ubidots
                     TransmitFlag = 0;             // Sent count - we are happy
@@ -301,7 +303,7 @@ void loop()
     }
     else  {
         if (LastBump + debounce <= millis())  { // Need to stay awake for debounce period - no sleep on retransmit
-            Serial.print(F("Free Ram Bump: ")); // Print out the free memory for diagnostics
+            Serial.print(F("Free Ram: ")); // Print out the free memory for diagnostics
             Serial.println(freeRam());
             Serial.println(F("Entering Sleep mode"));
             NonBlockingDelay(100);     // this delay is needed, the sleep function will provoke a Serial error otherwise!!
@@ -335,8 +337,11 @@ boolean InitializeFona()    // Initialize the FONA
         return 0;
     }
     Serial.println(F("FONA is OK"));
-    GetConnected();                                              // Connect to network and start GPRS
-    while (!fona.enableGPRS(true))  {
+    if (!GetConnected()) {  // Connect to network
+        return 0;
+    }
+    while (!fona.enableGPRS(true))  {   // Start GPRS
+
         tries ++;
         Serial.print(F("Failed to turn on GPRS Attempt #"));
         Serial.println(tries);
@@ -383,6 +388,7 @@ boolean GetConnected()  // Connect and set up GPRS Data Services
 {
     tries = 0;
     int n = 0;
+    NonBlockingDelay(1000);
     do
     {
         tries ++;
@@ -398,12 +404,10 @@ boolean GetConnected()  // Connect and set up GPRS Data Services
         if (n == 3) Serial.println(F("Denied"));
         if (n == 4) Serial.println(F("Unknown"));
         if (n == 5) Serial.println(F("Registered roaming"));
-        
         NonBlockingDelay(500);
         if (tries >= ConnectRetryLimit)
         {
             Serial.println(F("Failed to connect to the network"));
-            TurnOffFona();
             return 0;
         }
     } while (n != 1 && n != 5);
@@ -468,10 +472,11 @@ boolean SendATCommand(char Command[], const char *response) // This has been my 
     
     while(millis() <= commandClock + TimeOut)         // Need to give the modem time to complete command
     {
-        index = 0;
+        index = 0;          // Zero the index
+        replyBuffer[index] = '\0';  // And terminate the C String
         while(!fona.available() &&  millis() <= commandClock + TimeOut);  //Need to look at this should it be >=
         while(fona.available()) {                                 // reading data into char array
-            fonaInput = Serial.read();
+            fonaInput = fona.read();
             if (fonaInput != '\n') {
                 replyBuffer[index]=fonaInput;    // writing data into array stripping out returns
                 index++;
@@ -482,7 +487,7 @@ boolean SendATCommand(char Command[], const char *response) // This has been my 
         }
         Serial.print(F("index="));
         Serial.print(index);
-        Serial.print(F(" - Reply: "));
+        Serial.println(F(" - Reply: "));
         Serial.println(replyBuffer);                           // Uncomment if needed to debug
         
         if (strstr(replyBuffer, response) != NULL) {
@@ -509,6 +514,7 @@ boolean sendToUbidots() // Send multiple Updates to Ubidots using Collections
     char batteryStr[10];                                  // put it in a character buffer
     char personCountStr[5];
     char retriesStr[5];
+    char url[19]="things.ubidots.com";
     dtostrf(stateOfCharge, 5, 2, batteryStr);             //5 is mininum width, 2 is precision
     int overheadLength = 172;  // 3 24-character keys plus the words (old 158)
     int succeeded;
@@ -518,7 +524,10 @@ boolean sendToUbidots() // Send multiple Updates to Ubidots using Collections
     int payloadLength = strlen(batteryStr)+ strlen(Location) + strlen(personCountStr) + strlen(retriesStr) + overheadLength;
     
     Serial.print(F("Start the connection to Ubidots: "));
-    if (SendATCommand("AT+CIPSTART=\"tcp\",\"things.ubidots.com\",\"80\"","CONNECT")) {
+    //if (SendATCommand("AT+CIPSTART=\"tcp\",\"things.ubidots.com\",\"80\"","CONNECT")) {
+    //    Serial.println(F("Connected"));
+    //}
+    if (fona.TCPconnect(url,80)) {
         Serial.println(F("Connected"));
     }
     else return 0;
@@ -679,7 +688,7 @@ void writeRegister(unsigned char address, unsigned char data)   // Writes a sing
 void CheckForBump()     // See if there was a bump while the Arduino was awake
 {
     byte source;
-    if (digitalRead(int2Pin)==0)    // If int2 goes LOW (inverted), either p/l has changed or there's been a single/double tap
+    if (digitalRead(intPinACC)==0)    // If int2 goes LOW (inverted), either p/l has changed or there's been a single/double tap
     {
         source = readRegister(0x0C);  // Read the interrupt source reg.
         if ((source & 0x08)==0x08) { // We are only interested in the TAP register so read that
@@ -724,13 +733,9 @@ void sleepNow()         // here we put the arduino to sleep
      * sleep mode: SLEEP_MODE_PWR_DOWN
      *
      */
-    Serial.print(F("In sleep function..."));
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);   // sleep mode is set here
-    Serial.print(F("set sleep mode..."));
-    
     sleep_enable();          // enables the sleep bit in the mcucr register
-    // so sleep is possible. just a safety pin
-    Serial.print(F("enabled sleep..."));
+                                // so sleep is possible. just a safety pin
     
     /* Now it is time to enable an interrupt. We do it here so an
      * accidentally pushed interrupt button doesn't interrupt
@@ -752,24 +757,15 @@ void sleepNow()         // here we put the arduino to sleep
      * In all but the IDLE sleep modes only LOW can be used.
      */
     
-    attachInterrupt(0,wakeUpNow, HIGH);   // use interrupt 3 (pin 1) for the accelerometer - not inverted
-    Serial.print(F("attached 0..."));
-    attachInterrupt(1, nap, FALLING);    // Interrupt 2 (pin 0) for the Real Time Clock
-    Serial.print(F("attached 1..."));
-    Serial.println(F("entering sleep"));
+    attachInterrupt(digitalPinToInterrupt(intPinACC),wakeUpNow, HIGH);   // attach the interrupt for the accelerometer - not inverted
+    attachInterrupt(digitalPinToInterrupt(intPinRTC), nap, FALLING);    // attach the interrupt for the Real Time Clock
     NonBlockingDelay(100);
     sleep_mode();            // here the device is actually put to sleep!!
     // THE PROGRAM CONTINUES FROM HERE AFTER WAKING UP
-    Serial.print(F("Just woke up..."));
-    
     sleep_disable();         // first thing after waking from sleep:
     // disable sleep...
-    Serial.print(F("disabled sleep..."));
-    detachInterrupt(0);      // disables interrupts so the
-    Serial.print(F("detached 0..."));
-    detachInterrupt(1);      // wakeUpNow code will not be executed
-    // during normal running time.
-    Serial.println(F("detached 1 - now back to work"));
+    detachInterrupt(digitalPinToInterrupt(intPinACC));      // disables accelerometer interrupt
+    detachInterrupt(digitalPinToInterrupt(intPinRTC));      // disables the RTC interrupt
 }
 
 
@@ -845,8 +841,7 @@ void setLocationAndTime()   // Where we get info from the network to set time an
 
 void set_time(int year,int month, int day,int hour, int minute,int second)  // Here we set the clock with passed values
 {
-    Serial.println(F("Setting Time Based on GSMLoc Results"));
-    // set initially to epoch
+    Serial.println(F("Setting Time Based on GSMLoc Results"));    // set initially to epoch
     RTC.setSeconds(second);
     RTC.setMinutes(minute);
     //  RTC.setMinutes(58);   // For Testing if you want to see the hourly alarm
@@ -860,10 +855,10 @@ void set_time(int year,int month, int day,int hour, int minute,int second)  // H
 
 void read_time()    // Read the current time
 {
-    Serial.println (F("The current time is - Now "));
-    //RTC.readTime(); // update RTC library's buffers from chip
-    //printTime(0);
-    //erial.println();
+    Serial.println (F("The current time is: "));
+    RTC.readTime(); // update RTC library's buffers from chip
+    printTime(0);
+    Serial.println();
 }
 
 void set_hourly_alarm() // Sets an RTC alarm to go off every hour
@@ -881,9 +876,10 @@ void set_hourly_alarm() // Sets an RTC alarm to go off every hour
     RTC.setDays(0);
     RTC.setMonths(0);
     RTC.setYears(0);
+    RTC.enable_interrupt();
     RTC.setAlarmRepeat(EVERY_HOUR); // There is no DS1339 setting for 'alarm once' - user must shut off the alarm after it goes off.
     RTC.writeAlarm();
-    delay(500);
+    NonBlockingDelay(500);
     RTC.readAlarm();
     printTime(1);
 }
@@ -907,6 +903,7 @@ void set_minute_alarm() // Sets an RTC alarm to go off every minute
     RTC.writeAlarm();
     NonBlockingDelay(500);
     RTC.readAlarm();
+    RTC.enable_interrupt();
     Serial.print(F("Read back: "));
     printTime(1);
     Serial.println();
@@ -990,4 +987,5 @@ void wakeUpNow()              // here the accelerometer interrupt is handled aft
 void nap()
 {
     // Here is where we wake up from sleep based on the RTC alarm
+
 }
